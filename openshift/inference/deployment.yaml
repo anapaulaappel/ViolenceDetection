@@ -1,0 +1,203 @@
+---
+# ── Namespace ─────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: violence-detection
+
+---
+# ── PVC for model weights ─────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-weights-pvc
+  namespace: violence-detection
+spec:
+  accessModes:
+    - ReadWriteMany          # Multiple pods can read; upload once
+  resources:
+    requests:
+      storage: 2Gi
+  storageClassName: ocs-storagecluster-cephfs   # OpenShift ODF/OCS — adjust to your cluster
+
+---
+# ── ConfigMap — inference tuning ─────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: inference-config
+  namespace: violence-detection
+data:
+  INFERENCE_DEVICE:  "cuda"
+  CONF_THRESHOLD:    "0.35"
+  IOU_THRESHOLD:     "0.45"
+  TARGET_FPS:        "10"
+  IMG_SIZE:          "640"
+  TEMPORAL_WINDOW:   "16"
+  YOLO_WEIGHTS:      "/app/models/best.pt"
+  LSTM_WEIGHTS:      "/app/models/temporal_lstm.pt"
+
+---
+# ── Deployment ────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: violence-detection-inference
+  namespace: violence-detection
+  labels:
+    app: violence-detection
+    component: inference
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: violence-detection
+      component: inference
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: violence-detection
+        component: inference
+      annotations:
+        # Prometheus scrape
+        prometheus.io/scrape: "true"
+        prometheus.io/path:   "/metrics"
+        prometheus.io/port:   "8080"
+    spec:
+      # OpenShift SCC
+      securityContext:
+        runAsNonRoot: true
+        runAsUser:    1001
+        fsGroup:      0
+
+      containers:
+        - name: inference-api
+          image: image-registry.openshift-image-registry.svc:5000/violence-detection/inference:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+
+          envFrom:
+            - configMapRef:
+                name: inference-config
+
+          resources:
+            requests:
+              cpu:              "2"
+              memory:           "4Gi"
+              nvidia.com/gpu:   "1"
+            limits:
+              cpu:              "4"
+              memory:           "8Gi"
+              nvidia.com/gpu:   "1"
+
+          volumeMounts:
+            - name: model-weights
+              mountPath: /app/models
+              readOnly: true
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds:       15
+            failureThreshold:    3
+
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds:       10
+            failureThreshold:    3
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem:   false
+            capabilities:
+              drop: ["ALL"]
+
+      volumes:
+        - name: model-weights
+          persistentVolumeClaim:
+            claimName: model-weights-pvc
+
+      # GPU node affinity — requires NVIDIA GPU Operator on OpenShift
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+
+      tolerations:
+        - key:      nvidia.com/gpu
+          operator: Exists
+          effect:   NoSchedule
+
+---
+# ── Service ───────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: violence-detection-svc
+  namespace: violence-detection
+  labels:
+    app: violence-detection
+spec:
+  selector:
+    app: violence-detection
+    component: inference
+  ports:
+    - name:       http
+      port:       80
+      targetPort: 8080
+      protocol:   TCP
+
+---
+# ── Route (OpenShift-native ingress) ─────────────────────────────────────────
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: violence-detection-route
+  namespace: violence-detection
+spec:
+  to:
+    kind:   Service
+    name:   violence-detection-svc
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+
+---
+# ── HorizontalPodAutoscaler ───────────────────────────────────────────────────
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: violence-detection-hpa
+  namespace: violence-detection
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind:       Deployment
+    name:       violence-detection-inference
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type:               Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type:               Utilization
+          averageUtilization: 80

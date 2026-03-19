@@ -1,0 +1,97 @@
+---
+# ── Training Job — OpenShift AI (RHOAI) compatible ──────────────────────────
+# Run once to train the YOLOv8 model and save weights to PVC
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: violence-detection-training
+  namespace: violence-detection
+  labels:
+    app:       violence-detection
+    component: training
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 86400   # clean up after 24h
+  template:
+    spec:
+      restartPolicy: OnFailure
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser:    1001
+        fsGroup:      0
+
+      containers:
+        - name: trainer
+          image: image-registry.openshift-image-registry.svc:5000/violence-detection/trainer:latest
+          imagePullPolicy: Always
+
+          env:
+            - name:  PYTHONUNBUFFERED
+              value: "1"
+            - name:  CUDA_VISIBLE_DEVICES
+              value: "0"
+
+          args:
+            - python3.11
+            - training/scripts/train.py
+            - --dataset-yaml
+            - /data/processed/dataset.yaml
+            - --epochs
+            - "100"
+            - --batch
+            - "16"
+            - --device
+            - "0"
+
+          resources:
+            requests:
+              cpu:            "4"
+              memory:         "16Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu:            "8"
+              memory:         "32Gi"
+              nvidia.com/gpu: "1"
+
+          volumeMounts:
+            - name:      dataset-pvc
+              mountPath: /data
+            - name:      model-weights
+              mountPath: /app/training/models
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+
+      volumes:
+        - name: dataset-pvc
+          persistentVolumeClaim:
+            claimName: dataset-pvc
+        - name: model-weights
+          persistentVolumeClaim:
+            claimName: model-weights-pvc
+
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+
+      tolerations:
+        - key:      nvidia.com/gpu
+          operator: Exists
+          effect:   NoSchedule
+
+---
+# ── Dataset PVC ───────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dataset-pvc
+  namespace: violence-detection
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: ocs-storagecluster-ceph-rbd

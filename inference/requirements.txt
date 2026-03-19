@@ -1,0 +1,24 @@
+# ── Inference Service Requirements ────────────────────────────────────────────
+# Pin major versions; test with: pip install -r requirements.txt
+
+# Deep learning
+torch==2.3.0
+torchvision==0.18.0
+# Install CUDA wheel separately in Dockerfile if needed:
+# --extra-index-url https://download.pytorch.org/whl/cu121
+
+# YOLO
+ultralytics==8.2.0
+
+# Computer vision
+opencv-python-headless==4.9.0.80
+numpy==1.26.4
+
+# API
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+pydantic==2.7.1
+python-multipart==0.0.9     # file uploads
+
+# Utilities
+PyYAML==6.0.1
